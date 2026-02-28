@@ -5,14 +5,15 @@
  *
  * 1. Remotion Player のDOM要素をMediaRecorderでWebM録画
  * 2. WebMをサーバーの /api/convert に送信
- * 3. サーバーがffmpegでMP4に変換して返す
- * 4. MP4をダウンロード
+ * 3. サーバーがffmpegでMP4に変換し、ファイルに保存
+ * 4. /api/download からMP4を直接ダウンロード
  */
 
 type ProgressCallback = (message: string) => void;
 
 /**
- * 指定された HTML要素を録画し、MP4としてダウンロード可能なURLを返す
+ * 指定HTML要素を録画→MP4変換し、ダウンロードURLを返す
+ * 返されるURLは /api/download?file=xxx.mp4 の形式（Blob URLではない）
  */
 export async function recordAndExport(
     playerContainer: HTMLElement,
@@ -21,13 +22,11 @@ export async function recordAndExport(
 ): Promise<string> {
     onProgress('録画を準備中...');
 
-    // Step 1: Canvas にプレビューをキャプチャ
     const canvas = document.createElement('canvas');
     canvas.width = 1080;
     canvas.height = 1920;
     const ctx = canvas.getContext('2d')!;
 
-    // Step 2: Canvas の MediaStream を取得
     const stream = canvas.captureStream(30);
 
     const mimeType = getSupportedMimeType();
@@ -41,11 +40,9 @@ export async function recordAndExport(
         if (e.data.size > 0) chunks.push(e.data);
     };
 
-    // Step 3: DOM → Canvas フレームキャプチャ
     const captureFrame = () => {
         try {
             const sourceEl = playerContainer;
-
             ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -66,17 +63,17 @@ export async function recordAndExport(
                 captureDOMToCanvas(ctx, sourceEl, canvas.width, canvas.height);
             }
         } catch {
-            // フレームキャプチャエラーは無視
+            // ignore
         }
     };
 
-    // Step 4: WebM録画実行
+    // WebM録画
     const webmBlob = await new Promise<Blob>((resolve, reject) => {
         mediaRecorder.onstop = () => {
             try {
                 const blob = new Blob(chunks, { type: mimeType });
                 if (blob.size < 1000) {
-                    reject(new Error('録画データが空です。プレビューが再生中か確認してください。'));
+                    reject(new Error('録画データが空です'));
                     return;
                 }
                 resolve(blob);
@@ -84,10 +81,7 @@ export async function recordAndExport(
                 reject(err);
             }
         };
-
-        mediaRecorder.onerror = () => {
-            reject(new Error('録画中にエラーが発生しました'));
-        };
+        mediaRecorder.onerror = () => reject(new Error('録画エラー'));
 
         mediaRecorder.start(100);
         onProgress(`録画中... (0/${durationSeconds}秒)`);
@@ -112,7 +106,7 @@ export async function recordAndExport(
         }, durationSeconds * 1000 + 300);
     });
 
-    // Step 5: WebM → MP4 変換（サーバーサイド）
+    // サーバーでMP4に変換
     onProgress('MP4に変換中...');
     const formData = new FormData();
     formData.append('video', webmBlob, 'recording.webm');
@@ -127,16 +121,17 @@ export async function recordAndExport(
         throw new Error(errorData.error || `MP4変換に失敗 (${response.status})`);
     }
 
-    // MP4 Blobを取得
-    const mp4Blob = await response.blob();
+    const result = await response.json();
+    if (!result.success || !result.downloadUrl) {
+        throw new Error('MP4変換に失敗しました');
+    }
+
     onProgress('MP4変換完了！');
 
-    return URL.createObjectURL(mp4Blob);
+    // サーバー上のMP4ダウンロードURL（Blob URLではない）
+    return result.downloadUrl;
 }
 
-/**
- * SVG foreignObject でDOMをCanvasに描画（フォールバック）
- */
 function captureDOMToCanvas(
     ctx: CanvasRenderingContext2D,
     el: HTMLElement,
@@ -144,39 +139,26 @@ function captureDOMToCanvas(
     h: number
 ) {
     const computedStyle = getComputedStyle(el);
-    const bgColor = computedStyle.backgroundColor || '#000';
-    ctx.fillStyle = bgColor;
+    ctx.fillStyle = computedStyle.backgroundColor || '#000';
     ctx.fillRect(0, 0, w, h);
 
-    const allText = el.querySelectorAll('*');
-    allText.forEach((node) => {
+    el.querySelectorAll('*').forEach((node) => {
         if (node.textContent && node.children.length === 0) {
             const style = getComputedStyle(node);
             const rect = node.getBoundingClientRect();
             const containerRect = el.getBoundingClientRect();
-
             const scaleX = w / containerRect.width;
-            const scaleY = h / containerRect.height;
             const x = (rect.left - containerRect.left) * scaleX;
-            const y = (rect.top - containerRect.top) * scaleY;
-
+            const y = (rect.top - containerRect.top) * (h / containerRect.height);
             const fontSize = parseFloat(style.fontSize) * scaleX;
             ctx.font = `${style.fontWeight} ${fontSize}px ${style.fontFamily}`;
             ctx.fillStyle = style.color;
             ctx.textAlign = 'center';
-            ctx.fillText(
-                node.textContent.trim(),
-                x + (rect.width * scaleX) / 2,
-                y + fontSize,
-                rect.width * scaleX
-            );
+            ctx.fillText(node.textContent.trim(), x + (rect.width * scaleX) / 2, y + fontSize, rect.width * scaleX);
         }
     });
 }
 
-/**
- * デバイスがサポートするMIMEタイプを取得
- */
 function getSupportedMimeType(): string {
     const types = [
         'video/webm;codecs=vp9,opus',
@@ -192,12 +174,13 @@ function getSupportedMimeType(): string {
 }
 
 /**
- * MP4ファイルのダウンロードをトリガー
+ * MP4ダウンロード（サーバーURLから直接ダウンロード）
  */
-export function triggerDownload(url: string, filename: string = 'fortune_ranking.mp4') {
+export function triggerDownload(downloadUrl: string) {
+    // aタグでサーバーURLにアクセス → Content-Disposition: attachment で確実にダウンロード
     const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
+    a.href = downloadUrl;
+    a.download = ''; // サーバー側のContent-Dispositionのfilenameを使用
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

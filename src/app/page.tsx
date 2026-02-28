@@ -8,7 +8,7 @@ import { CtaPanel } from '@/components/panels/CtaPanel';
 import { RankingDataPanel } from '@/components/panels/RankingDataPanel';
 import { AudioPanel } from '@/components/panels/AudioPanel';
 import { handleGenerateAction, handleTitleSuggestAction } from '@/app/actions';
-import { recordAndExport, triggerDownload } from '@/lib/browserExport';
+import { recordAndExport } from '@/lib/browserExport';
 import {
   VideoConfig, DEFAULT_VIDEO_CONFIG,
   TextStylePreset, BackgroundSettings, CtaConfig, RankingItem,
@@ -179,12 +179,13 @@ export default function Home() {
             </span>
           )}
           {downloadUrl && (
-            <button
-              onClick={() => triggerDownload(downloadUrl)}
+            <a
+              href={downloadUrl}
+              download
               className="px-3 py-2 bg-green-600/80 text-white text-xs font-bold rounded-lg hover:bg-green-500 transition-colors flex items-center gap-1.5"
             >
-              ⬇️ ダウンロード
-            </button>
+              ⬇️ MP4ダウンロード
+            </a>
           )}
           <button
             onClick={handleExport}
